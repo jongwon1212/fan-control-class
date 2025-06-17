@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>USB 시리얼 연결 - 손 인식 선풍기 제어</title>
+  <meta charset="UTF-8">
+  <style>
+    body { 
+      font-family: sans-serif; 
+      text-align: center; 
+      margin-top: 30px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      min-height: 100vh;
+    }
+    .container {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 30px;
+      border-radius: 15px;
+      backdrop-filter: blur(10px);
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    input {
+      padding: 10px;
+      border-radius: 8px;
+      border: none;
+      margin: 10px;
+      width: 300px;
+    }
+    button {
+      background: linear-gradient(45deg, #ff6b6b, #feca57);
+      color: white;
+      border: none;
+      padding: 12px 25px;
+      margin: 10px;
+      border-radius: 25px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: bold;
+      transition: transform 0.2s;
+    }
+    button:hover {
+      transform: translateY(-2px);
+    }
+    #status {
+      margin: 20px 0;
+      padding: 15px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.2);
+      font-size: 18px;
+      font-weight: bold;
+    }
+    #webcam {
+      border: 3px solid #fff;
+      border-radius: 15px;
+      margin: 20px;
+    }
+    .prediction-info {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 15px;
+      border-radius: 10px;
+      margin: 20px 0;
+    }
+    .info-box {
+      background: rgba(255, 165, 0, 0.2);
+      padding: 15px;
+      border-radius: 10px;
+      margin: 20px 0;
+      border-left: 4px solid orange;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>🔌 USB 시리얼 연결 - 손 인식 선풍기 제어</h2>
+    
+    <div class="info-box">
+      <strong>📋 사용법:</strong><br>
+      1. 마이크로비트를 USB로 연결<br>
+      2. 티처블 머신 모델 URL 입력<br>
+      3. 시리얼 연결 후 모델 시작<br>
+      4. 손동작으로 선풍기 제어!
+    </div>
+    
+    <input id="modelURL" placeholder="https://teachablemachine.withgoogle.com/models/abcd1234/" size="50">
+    <br><br>
+    <button onclick="connectSerial()">1️⃣ 시리얼 연결</button>
+    <button onclick="startSystem()">2️⃣ 모델 시작하기</button>
+    <button onclick="disconnectSerial()">연결 해제</button>
+    <br><br>
+    
+    <div id="status">USB 케이블로 마이크로비트를 연결하고 "시리얼 연결"을 클릭하세요</div>
+    
+    <div id="webcam-container">
+      <video id="webcam" autoplay width="200" height="200"></video>
+    </div>
+    
+    <div id="predictionInfo" class="prediction-info" style="display:none;">
+      <div id="currentPrediction">예측 결과가 여기에 표시됩니다</div>
+      <div id="confidenceLevel">신뢰도: 0%</div>
+      <div id="lastCommand">마지막 명령: 없음</div>
+    </div>
+  </div>
+
+  <!-- TensorFlow.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <!-- TeachableMachine image -->
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+  
+  <script>
+    let model, webcam, previousLabel = "";
+    let port = null;
+    let writer = null;
+    let isConnected = false;
+    
+    function updateStatus(message, color = '#fff') {
+      const status = document.getElementById('status');
+      status.textContent = message;
+      status.style.color = color;
+    }
+    
+    async function connectSerial() {
+      try {
+        if (!('serial' in navigator)) {
+          alert('❌ 웹 시리얼 API를 지원하지 않는 브라우저입니다. Chrome을 사용하세요.');
+          return;
+        }
+        
+        updateStatus('시리얼 포트 선택 중...', '#feca57');
+        
+        // 시리얼 포트 요청
+        port = await navigator.serial.requestPort();
+        
+        // 시리얼 포트 열기 (마이크로비트는 보통 115200 baud rate)
+        await port.open({ baudRate: 115200 });
+        
+        // Writer 생성
+        writer = port.writable.getWriter();
+        isConnected = true;
+        
+        updateStatus('✅ 시리얼 연결 완료!', '#4ecdc4');
+        
+        // 연결 테스트
+        await sendCommand("HELLO");
+        
+      } catch (error) {
+        updateStatus('❌ 시리얼 연결 실패: ' + error.message, '#ff6b6b');
+        console.error('시리얼 연결 오류:', error);
+      }
+    }
+    
+    async function disconnectSerial() {
+      try {
+        if (writer) {
+          writer.releaseLock();
+          writer = null;
+        }
+        if (port) {
+          await port.close();
+          port = null;
+        }
+        isConnected = false;
+        updateStatus('시리얼 연결 해제됨', '#fff');
+      } catch (error) {
+        console.error('연결 해제 오류:', error);
+      }
+    }
+    
+    async function sendCommand(command) {
+      if (!isConnected || !writer) {
+        updateStatus('⚠️ 시리얼이 연결되지 않음', '#feca57');
+        return;
+      }
+      
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(command + '\n');
+        await writer.write(data);
+        console.log('전송 성공:', command);
+        
+        // 명령어에 따라 한글 표시
+        let displayText = command;
+        if (command === "FAN_ON") displayText = "선풍기 작동!";
+        else if (command === "FAN_OFF") displayText = "선풍기 멈춤!";
+        
+        document.getElementById('lastCommand').textContent = `마지막 명령: ${displayText}`;
+      } catch (error) {
+        updateStatus('❌ 전송 실패: ' + error.message, '#ff6b6b');
+        console.error('전송 오류:', error);
+      }
+    }
+    
+    async function startSystem() {
+      if (!isConnected) {
+        alert('먼저 시리얼 연결을 하세요!');
+        return;
+      }
+      
+      // tmImage 로딩 확인
+      if (typeof tmImage === 'undefined') {
+        alert('❌ Teachable Machine 라이브러리가 로드되지 않았습니다. 페이지를 새로고침해주세요.');
+        return;
+      }
+      
+      const input = document.getElementById("modelURL").value.trim();
+      if (!input.startsWith("https://")) {
+        alert("Teachable Machine 주소를 정확히 입력해주세요!");
+        return;
+      }
+      
+      const modelURL = input + "model.json";
+      const metadataURL = input + "metadata.json";
+      
+      try {
+        updateStatus('모델 로딩 중...', '#feca57');
+        model = await tmImage.load(modelURL, metadataURL);
+        console.log('Model loaded:', model);
+        
+        // 클래스 개수 확인
+        console.log('클래스 개수:', model.getClassLabels().length);
+        console.log('클래스 이름들:', model.getClassLabels());
+        
+      } catch (err) {
+        updateStatus('❌ 모델 로딩 실패', '#ff6b6b');
+        alert("모델을 불러오지 못했습니다. 주소를 확인하세요.");
+        console.error(err);
+        return;
+      }
+      
+      // 웹캠 설정
+      webcam = new tmImage.Webcam(200, 200, true);
+      try {
+        updateStatus('웹캠 설정 중...', '#feca57');
+        await webcam.setup();
+        await webcam.play();
+        
+        // 웹캠 화면 표시
+        const container = document.getElementById('webcam-container');
+        const videoElement = document.getElementById('webcam');
+        videoElement.style.display = 'none';
+        
+        webcam.canvas.style.border = '3px solid #fff';
+        webcam.canvas.style.borderRadius = '15px';
+        container.appendChild(webcam.canvas);
+        
+        updateStatus('🎥 시스템 동작 중! 손동작으로 선풍기를 제어하세요!', '#4ecdc4');
+        document.getElementById('predictionInfo').style.display = 'block';
+        
+        // 시작 신호 전송
+        await sendCommand("START");
+        
+      } catch (e) {
+        updateStatus('❌ 웹캠 오류', '#ff6b6b');
+        alert("웹캠 오류: 카메라 권한을 허용했는지 확인하세요.");
+        return;
+      }
+      
+      requestAnimationFrame(loop);
+    }
+    
+    async function loop() {
+      if (!webcam || !webcam.canvas) return;
+      
+      webcam.update();
+      const prediction = await model.predict(webcam.canvas);
+      
+      // 모든 예측 결과 로그
+      console.log('예측 결과:', prediction.map(p => `${p.className}: ${(p.probability * 100).toFixed(1)}%`));
+      
+      // 가장 높은 확률의 클래스 찾기
+      let maxProb = 0;
+      let maxIndex = 0;
+      for (let i = 0; i < prediction.length; i++) {
+        if (prediction[i].probability > maxProb) {
+          maxProb = prediction[i].probability;
+          maxIndex = i;
+        }
+      }
+      
+      const className = prediction[maxIndex].className;
+      const confidence = (maxProb * 100).toFixed(1);
+      
+      // UI 업데이트
+      document.getElementById('currentPrediction').textContent = `인식: ${className}`;
+      document.getElementById('confidenceLevel').textContent = `신뢰도: ${confidence}%`;
+      
+      // 선풍기 제어 로직 (임계값 0.8)
+      let result = "";
+      if (maxProb > 0.8) {
+        // 클래스에 따른 제어 (티처블 머신에서 설정한 순서에 맞게 조정)
+        if (className.includes("open") || className.includes("펼침") || className.includes("손바닥") || maxIndex === 2) {
+          result = "FAN_ON";
+        } else if (className.includes("fist") || className.includes("주먹") || className.includes("closed") || maxIndex === 0 || maxIndex === 1) {
+          result = "FAN_OFF";
+        }
+      }
+      
+      // 이전 결과와 다를 때만 전송
+      if (result !== previousLabel && result !== "") {
+        previousLabel = result;
+        console.log('전송:', result);
+        
+        await sendCommand(result);
+        updateStatus(`📤 ${result === 'FAN_ON' ? '선풍기 작동!' : '선풍기 멈춤'} 명령 전송!`, '#4ecdc4');
+      }
+      
+      requestAnimationFrame(loop);
+    }
+    
+    // 브라우저 호환성 확인
+    if (!('serial' in navigator)) {
+      updateStatus('❌ 웹 시리얼 API를 지원하지 않는 브라우저입니다. Chrome을 사용하세요.', '#ff6b6b');
+    }
+    
+    // 페이지 닫을 때 연결 해제
+    window.addEventListener('beforeunload', disconnectSerial);
+  </script>
+</body>
+</html>
